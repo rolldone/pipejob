@@ -36,18 +36,13 @@ type Step struct {
 	// When is a more intuitive condition DSL: simple operators like contains,
 	// equals, regex and exit_code. It is evaluated after the legacy
 	// `conditions` patterns (kept for backward compatibility).
-	When []struct {
-		Contains string `yaml:"contains"`
-		Equals   string `yaml:"equals"`
-		Regex    string `yaml:"regex"`
-		ExitCode *int   `yaml:"exit_code"`
-		Action   string `yaml:"action"`
-		Step     string `yaml:"step"`
-		Job      string `yaml:"job"`
-	} `yaml:"when"`
-	ElseAction string `yaml:"else_action"`
-	ElseStep   string `yaml:"else_step"`
-	ElseJob    string `yaml:"else_job"`
+	// When supports a small DSL with simple operators and nested groups.
+	// A `when` entry may be a leaf condition (contains/equals/regex/exit_code)
+	// or a group using `all` (AND) or `any` (OR).
+	When       []WhenEntry `yaml:"when"`
+	ElseAction string      `yaml:"else_action"`
+	ElseStep   string      `yaml:"else_step"`
+	ElseJob    string      `yaml:"else_job"`
 	// optional timeout for the step, expressed as a Go duration string
 	// (for example: "30s", "1m"). If set, the step's command will be
 	// killed when the timeout is reached and treated as a non-zero exit.
@@ -61,6 +56,21 @@ type Step struct {
 	OnTimeout     string `yaml:"on_timeout"`
 	OnTimeoutStep string `yaml:"on_timeout_step"`
 	OnTimeoutJob  string `yaml:"on_timeout_job"`
+}
+
+// WhenEntry represents a single `when` clause which can be a leaf condition
+// or a logical group (all/any) containing nested WhenEntry elements.
+type WhenEntry struct {
+	Contains string `yaml:"contains"`
+	Equals   string `yaml:"equals"`
+	Regex    string `yaml:"regex"`
+	ExitCode *int   `yaml:"exit_code"`
+	Action   string `yaml:"action"`
+	Step     string `yaml:"step"`
+	Job      string `yaml:"job"`
+	// Groups
+	All []WhenEntry `yaml:"all"`
+	Any []WhenEntry `yaml:"any"`
 }
 
 // helper to parse simple key=val CLI vars

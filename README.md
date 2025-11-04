@@ -109,6 +109,76 @@ steps:
     command: 'echo "EXIT42_OK"'
 ```
 
+  4) when groups (all / any)
+
+  The `when` DSL supports grouped logical operators `all` (AND) and `any` (OR). A group contains an array of nested `when` entries; the group evaluates to true when all (for `all`) or any (for `any`) of the nested entries evaluate to true.
+
+  Short semantics:
+  - `all`: every nested entry must match. Evaluation short-circuits to false on the first non-matching nested entry.
+  - `any`: at least one nested entry must match. Evaluation short-circuits to true on the first matching nested entry.
+
+  Groups can be nested (for example an `all` may contain an `any` entry), allowing you to build more complex boolean logic.
+
+  Example (all / AND):
+
+  ```yaml
+  steps:
+    - name: check
+      type: command
+      command: 'echo "alpha:42"'
+      when:
+        - all:
+            - contains: "alpha"
+            - regex: ":[0-9]+"
+          action: "goto_step"
+          step: "s2"
+    - name: s2
+      type: command
+      command: 'echo "ALL_OK"'
+  ```
+
+  Example (any / OR):
+
+  ```yaml
+  steps:
+    - name: check
+      type: command
+      command: 'echo "just alpha"'
+      when:
+        - any:
+            - contains: "missing"
+            - equals: "just alpha"
+          action: "goto_step"
+          step: "s2"
+    - name: s2
+      type: command
+      command: 'echo "ANY_OK"'
+  ```
+
+
+When groups examples
+--------------------
+
+Two example pipelines demonstrating grouped `when` clauses are included in the `examples/` directory:
+
+- `examples/when-groups-all.yaml` — uses an `all` group (AND): both sub-conditions must match. Expected runtime output when run with `./pipejob examples/when-groups-all.yaml`:
+
+```
+-> echo "alpha:42"
+alpha:42
+-> echo "ALL_OK"
+ALL_OK
+```
+
+- `examples/when-groups-any.yaml` — uses an `any` group (OR): any sub-condition may match. Expected runtime output when run with `./pipejob examples/when-groups-any.yaml`:
+
+```
+-> echo "just alpha"
+just alpha
+-> echo "ANY_OK"
+ANY_OK
+```
+
 Notes:
 - Legacy `conditions` (pattern + action) are still supported and evaluated first for backward compatibility; `when` is evaluated after. If you prefer `when` to be primary we can flip the order in a follow-up.
 - `when` values are interpolated using the same `{{VAR}}` rules before evaluation (e.g. `contains: "{{OUT}}"`).

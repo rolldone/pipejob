@@ -1,0 +1,17 @@
+pipeline:
+  name: when-groups-all
+  jobs:
+    - name: j1
+      steps:
+        - name: s1
+          type: command
+          command: 'echo "alpha:42"'
+          when:
+            - all:
+                - contains: "alpha"
+                - regex: ":[0-9]+"
+              action: "goto_step"
+              step: "s2"
+        - name: s2
+          type: command
+          command: 'echo "ALL_OK"'

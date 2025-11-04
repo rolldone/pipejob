@@ -313,92 +313,32 @@ func RunWithArgs(args []string) (rc int) {
 				fmt.Fprintf(os.Stderr, "failed to create temp dir for logs %s: %v\n", tempDir, err)
 				return
 			}
-			lf2, err := os.Create(logPath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to create log file %s: %v\n", logPath, err)
-				return
+			if lf == nil {
+				// write the in-memory buffer to the log file
+				if err := os.WriteFile(logPath, logBuf, 0644); err != nil {
+					fmt.Fprintf(os.Stderr, "failed to write log file %s: %v\n", logPath, err)
+				} else {
+					fmt.Fprintf(os.Stderr, "logs written to: %s\n", logPath)
+				}
 			}
-			// prepend an error-evidence header similar to pipeline logs
-			header := []byte("=== ERROR EVIDENCE (last ~300KB) ===\n")
-			_, _ = lf2.Write(header)
-			_, _ = lf2.Write(logBuf)
-			_ = lf2.Close()
-			fmt.Fprintf(os.Stderr, "pipejob: logs preserved at %s\n", tempDir)
-			return
 		}
-		// success case: do not write logs (save IO) and do nothing
 	}()
 
-	// dry-run: print rendered steps and exit
-	if dryRun {
-		fmt.Printf("Pipeline: %s\n", p.Pipeline.Name)
-		for _, job := range p.Pipeline.Jobs {
-			fmt.Printf("Job: %s\n", job.Name)
-			for _, step := range job.Steps {
-				if strings.ToLower(step.Type) != "command" && step.Type != "" {
-					fmt.Printf("  step %s: unsupported step type '%s' (would abort)\n", step.Name, step.Type)
-					continue
-				}
-				cmds := step.Commands
-				if len(cmds) == 0 && step.Command != "" {
-					cmds = []string{step.Command}
-				}
-				for _, c := range cmds {
-					rc := interpolate(c, vars)
-					fmt.Printf("  %s\n", rc)
-				}
-			}
-		}
-		return 0
-	}
+	// prepare execution queue (copy pipeline jobs so we can insert resume jobs)
+	execJobs := make([]Job, len(p.Pipeline.Jobs))
+	copy(execJobs, p.Pipeline.Jobs)
 
-	// Determine job execution order. If Pipeline.Runs is provided, use that
-	// order. Otherwise use the order jobs are declared in the YAML.
-	var execJobs []Job
-	if len(p.Pipeline.Runs) > 0 {
-		// Build a name->job map
-		jm := map[string]Job{}
-		for _, j := range p.Pipeline.Jobs {
-			jm[j.Name] = j
-		}
-		for _, name := range p.Pipeline.Runs {
-			j, ok := jm[name]
-			if !ok {
-				msg := fmt.Sprintf("runs lists unknown job '%s' - aborting", name)
-				fmt.Fprintln(os.Stderr, msg)
-				writeLog(msg)
-				return 6
-			}
-			execJobs = append(execJobs, j)
-		}
-	} else {
-		execJobs = p.Pipeline.Jobs
-	}
-
-	// Execute each command step sequentially with condition support.
-	// Use index-based loops so we can implement goto_step and goto_job.
+	// iterate jobs and steps
 	for ji := 0; ji < len(execJobs); ji++ {
 		job := &execJobs[ji]
-		fmt.Printf("== Job: %s ==\n", job.Name)
-		writeLog(fmt.Sprintf("== Job: %s ==", job.Name))
-		// Build step name -> index map for goto_step resolution
-		stepIndex := map[string]int{}
-		for i, s := range job.Steps {
-			stepIndex[s.Name] = i
+		// build step index map for goto_step lookups
+		stepIndex := make(map[string]int)
+		for idx, st := range job.Steps {
+			stepIndex[st.Name] = idx
 		}
 
 		for si := 0; si < len(job.Steps); si++ {
 			step := &job.Steps[si]
-			if strings.ToLower(step.Type) != "command" && step.Type != "" {
-				msg := fmt.Sprintf("unsupported step type '%s' in step '%s' - aborting", step.Type, step.Name)
-				fmt.Fprintln(os.Stderr, msg)
-				writeLog(msg)
-				return 4
-			}
-			cmds := step.Commands
-			if len(cmds) == 0 && step.Command != "" {
-				cmds = []string{step.Command}
-			}
 
 			// run each command and capture combined output
 			var combinedOut strings.Builder
@@ -440,6 +380,17 @@ func RunWithArgs(args []string) (rc int) {
 				stepIdleTimeout = d
 			}
 
+			// build command list: `commands` takes priority over `command`
+			var cmds []string
+			if len(step.Commands) > 0 {
+				cmds = step.Commands
+			} else if step.Command != "" {
+				cmds = []string{step.Command}
+			} else {
+				// nothing to run in this step
+				continue
+			}
+
 			for _, c := range cmds {
 				rc := interpolate(c, vars)
 				// Always print the command being executed so runs are traceable;
@@ -447,6 +398,10 @@ func RunWithArgs(args []string) (rc int) {
 				// inline per-step error messages, not the command itself.
 				fmt.Printf("-> %s\n", rc)
 				writeLog("CMD: " + rc)
+				if dryRun {
+					// skip execution in dry-run mode
+					continue
+				}
 				// capture output
 				var outBuf bytes.Buffer
 				exitCode, err := runLocalCommandExec(rc, stepTimeout, stepIdleTimeout, &outBuf, &outBuf)
@@ -547,37 +502,13 @@ func RunWithArgs(args []string) (rc int) {
 			// new `when` DSL - simpler operators. Evaluated after legacy conditions.
 			if !conditionMatched {
 				for _, w := range step.When {
-					match := false
-					// evaluate operators with interpolation
-					if w.Contains != "" {
-						if strings.Contains(outStr, interpolate(w.Contains, vars)) {
-							match = true
-						}
+					match, err := evalWhenEntry(w, outStr, lastExitCode, vars)
+					if err != nil {
+						msg := fmt.Sprintf("invalid when entry in step %s: %v", step.Name, err)
+						fmt.Fprintln(os.Stderr, msg)
+						writeLog(msg)
+						return 6
 					}
-					if !match && w.Equals != "" {
-						if strings.TrimSpace(outStr) == strings.TrimSpace(interpolate(w.Equals, vars)) {
-							match = true
-						}
-					}
-					if !match && w.Regex != "" {
-						pat := interpolate(w.Regex, vars)
-						re, err := regexp.Compile(pat)
-						if err != nil {
-							msg := fmt.Sprintf("invalid when.regex '%s' in step %s: %v", pat, step.Name, err)
-							fmt.Fprintln(os.Stderr, msg)
-							writeLog(msg)
-							return 6
-						}
-						if re.MatchString(outStr) {
-							match = true
-						}
-					}
-					if !match && w.ExitCode != nil {
-						if lastExitCode == *w.ExitCode {
-							match = true
-						}
-					}
-
 					if match {
 						conditionMatched = true
 						switch w.Action {
@@ -760,13 +691,77 @@ func RunWithArgs(args []string) (rc int) {
 				return 5
 			}
 		}
-
 	}
-
 	// On success we avoid printing the log path to prevent confusion when the
 	// temporary workspace is cleaned up. Errors still print messages to stderr.
 	writeLog("completed")
 	return 0
+}
+
+// evalWhenEntry recursively evaluates a WhenEntry against the step output
+// and last exit code. It returns (match, error). If an invalid regex is
+// encountered the error is returned so the caller can log and abort.
+func evalWhenEntry(w WhenEntry, outStr string, lastExit int, vars map[string]string) (bool, error) {
+	// Group: all (AND)
+	if len(w.All) > 0 {
+		for _, sub := range w.All {
+			m, err := evalWhenEntry(sub, outStr, lastExit, vars)
+			if err != nil {
+				return false, err
+			}
+			if !m {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	// Group: any (OR)
+	if len(w.Any) > 0 {
+		for _, sub := range w.Any {
+			m, err := evalWhenEntry(sub, outStr, lastExit, vars)
+			if err != nil {
+				return false, err
+			}
+			if m {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
+	// Leaf conditions: evaluate available operator(s)
+	if w.Contains != "" {
+		if strings.Contains(outStr, interpolate(w.Contains, vars)) {
+			return true, nil
+		}
+		return false, nil
+	}
+	if w.Equals != "" {
+		if strings.TrimSpace(outStr) == strings.TrimSpace(interpolate(w.Equals, vars)) {
+			return true, nil
+		}
+		return false, nil
+	}
+	if w.Regex != "" {
+		pat := interpolate(w.Regex, vars)
+		re, err := regexp.Compile(pat)
+		if err != nil {
+			return false, err
+		}
+		if re.MatchString(outStr) {
+			return true, nil
+		}
+		return false, nil
+	}
+	if w.ExitCode != nil {
+		if lastExit == *w.ExitCode {
+			return true, nil
+		}
+		return false, nil
+	}
+
+	// No recognized operator -> false
+	return false, nil
 }
 
 // insertResumeJob inserts a copy of `job` containing only steps after

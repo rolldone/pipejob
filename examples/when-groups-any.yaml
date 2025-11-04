@@ -1,0 +1,17 @@
+pipeline:
+  name: when-groups-any
+  jobs:
+    - name: j1
+      steps:
+        - name: s1
+          type: command
+          command: 'echo "just alpha"'
+          when:
+            - any:
+                - contains: "missing"
+                - equals: "just alpha"
+              action: "goto_step"
+              step: "s2"
+        - name: s2
+          type: command
+          command: 'echo "ANY_OK"'
