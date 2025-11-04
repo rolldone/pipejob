@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -523,6 +524,11 @@ func RunWithArgs(args []string) (rc int) {
 							return 6
 						}
 						ji = found - 1 // outer loop will increment
+						// insert a resume job so we continue remaining steps after
+						// the target job completes
+						insertResumeJob(&execJobs, found, *job, si)
+						// exit current job's steps immediately
+						si = len(job.Steps)
 					case "fail":
 						msg := fmt.Sprintf("step %s failed due to condition match", step.Name)
 						fmt.Fprintln(os.Stderr, msg)
@@ -609,6 +615,10 @@ func RunWithArgs(args []string) (rc int) {
 								return 6
 							}
 							ji = found - 1
+							// insert resume job so remaining steps are run after the target
+							insertResumeJob(&execJobs, found, *job, si)
+							// exit current job's steps immediately
+							si = len(job.Steps)
 						case "fail":
 							msg := fmt.Sprintf("step %s failed due to when match", step.Name)
 							fmt.Fprintln(os.Stderr, msg)
@@ -625,6 +635,7 @@ func RunWithArgs(args []string) (rc int) {
 				}
 			}
 			if !conditionMatched && step.ElseAction != "" {
+				// else_action present; proceed to handle it
 				switch step.ElseAction {
 				case "continue":
 					// nothing
@@ -661,6 +672,10 @@ func RunWithArgs(args []string) (rc int) {
 						return 6
 					}
 					ji = found - 1
+					// insert resume job so remaining steps are run after the target
+					insertResumeJob(&execJobs, found, *job, si)
+					// exit current job's steps immediately
+					si = len(job.Steps)
 				case "fail":
 					msg := fmt.Sprintf("step %s failed due to else_action", step.Name)
 					if !(globalSilent || step.Silent) {
@@ -675,6 +690,8 @@ func RunWithArgs(args []string) (rc int) {
 					return 6
 				}
 			}
+			// mark else_action as handled so the default non-zero handling doesn't fire
+			conditionMatched = true
 
 			// If a timeout happened and user supplied an on_timeout shortcut, handle it
 			if errOccurred && lastExitCode == 124 && step.OnTimeout != "" && !conditionMatched {
@@ -714,6 +731,10 @@ func RunWithArgs(args []string) (rc int) {
 						return 6
 					}
 					ji = found - 1
+					// insert resume job so remaining steps are run after the target
+					insertResumeJob(&execJobs, found, *job, si)
+					// exit current job's steps immediately
+					si = len(job.Steps)
 				case "fail":
 					msg := fmt.Sprintf("step %s timed out", step.Name)
 					if !(globalSilent || step.Silent) {
@@ -746,6 +767,30 @@ func RunWithArgs(args []string) (rc int) {
 	// temporary workspace is cleaned up. Errors still print messages to stderr.
 	writeLog("completed")
 	return 0
+}
+
+// insertResumeJob inserts a copy of `job` containing only steps after
+// `resumeFrom` into execJobs immediately after index `after`. The new job
+// has a generated unique name so it will be executed exactly once.
+func insertResumeJob(execJobs *[]Job, after int, job Job, resumeFrom int) {
+	if resumeFrom+1 >= len(job.Steps) {
+		return
+	}
+	// copy remaining steps
+	rem := make([]Step, len(job.Steps[resumeFrom+1:]))
+	copy(rem, job.Steps[resumeFrom+1:])
+	newJob := Job{
+		Name:  job.Name + "-resume-" + strconv.FormatInt(time.Now().UnixNano(), 10),
+		Steps: rem,
+	}
+	pos := after + 1
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(*execJobs) {
+		pos = len(*execJobs)
+	}
+	*execJobs = append((*execJobs)[:pos], append([]Job{newJob}, (*execJobs)[pos:]...)...)
 }
 
 // parseEnvFile and interpolate were moved to helpers.go during the
