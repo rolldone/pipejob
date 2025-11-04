@@ -1,20 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
-	"context"
 	"flag"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -29,73 +22,9 @@ var runtimeShell string
 // the global `--silent` flag.
 var globalSilent bool
 
-// Minimal types matching the sample job YAML. We only support the fields
-// required for local command execution.
-type PipelineFile struct {
-	Pipeline struct {
-		Name      string            `yaml:"name"`
-		Runs      []string          `yaml:"runs"`
-		Variables map[string]string `yaml:"variables"`
-		Jobs      []Job             `yaml:"jobs"`
-	} `yaml:"pipeline"`
-}
-
-type Job struct {
-	Name  string `yaml:"name"`
-	Steps []Step `yaml:"steps"`
-}
-
-type Step struct {
-	Name       string   `yaml:"name"`
-	Type       string   `yaml:"type"`
-	Command    string   `yaml:"command"`
-	Commands   []string `yaml:"commands"`
-	SaveOutput string   `yaml:"save_output"`
-	Silent     bool     `yaml:"silent"`
-	Conditions []struct {
-		Pattern string `yaml:"pattern"`
-		Action  string `yaml:"action"`
-		Step    string `yaml:"step"`
-		Job     string `yaml:"job"`
-	} `yaml:"conditions"`
-	// When is a more intuitive condition DSL: simple operators like contains,
-	// equals, regex and exit_code. It is evaluated after the legacy
-	// `conditions` patterns (kept for backward compatibility).
-	When []struct {
-		Contains string `yaml:"contains"`
-		Equals   string `yaml:"equals"`
-		Regex    string `yaml:"regex"`
-		ExitCode *int   `yaml:"exit_code"`
-		Action   string `yaml:"action"`
-		Step     string `yaml:"step"`
-		Job      string `yaml:"job"`
-	} `yaml:"when"`
-	ElseAction string `yaml:"else_action"`
-	ElseStep   string `yaml:"else_step"`
-	ElseJob    string `yaml:"else_job"`
-	// optional timeout for the step, expressed as a Go duration string
-	// (for example: "30s", "1m"). If set, the step's command will be
-	// killed when the timeout is reached and treated as a non-zero exit.
-	Timeout string `yaml:"timeout"`
-	// optional idle timeout: maximum duration with no stdout/stderr activity
-	// (for example: "30s", "1m"). If the command produces no output for
-	// this duration the step is killed and treated as a timeout (exit 124).
-	IdleTimeout string `yaml:"idle_timeout"`
-	// on_timeout is a shortcut action applied when the step hits its timeout.
-	// Supported values: continue, drop, goto_step, goto_job, fail
-	OnTimeout     string `yaml:"on_timeout"`
-	OnTimeoutStep string `yaml:"on_timeout_step"`
-	OnTimeoutJob  string `yaml:"on_timeout_job"`
-}
-
-// helper to parse simple key=val CLI vars
-type kvList []string
-
-func (k *kvList) String() string { return strings.Join(*k, ",") }
-func (k *kvList) Set(v string) error {
-	*k = append(*k, v)
-	return nil
-}
+// Types and small helpers have been moved to types.go and helpers.go to keep
+// this file focused on CLI and execution flow. See types.go for
+// `PipelineFile`, `Job`, `Step`, and `kvList` definitions.
 
 func main() {
 	os.Exit(RunWithArgs(os.Args[1:]))
@@ -519,7 +448,7 @@ func RunWithArgs(args []string) (rc int) {
 				writeLog("CMD: " + rc)
 				// capture output
 				var outBuf bytes.Buffer
-				exitCode, err := runLocalCommand(rc, stepTimeout, stepIdleTimeout, &outBuf, &outBuf)
+				exitCode, err := runLocalCommandExec(rc, stepTimeout, stepIdleTimeout, &outBuf, &outBuf)
 				lastExitCode = exitCode
 				if err != nil {
 					msg := fmt.Sprintf("command failed: %v", err)
@@ -586,7 +515,7 @@ func RunWithArgs(args []string) (rc int) {
 							return 6
 						}
 						// find job index in execJobs
-						found, ok := resolveJobIndex(&execJobs, p.Pipeline.Jobs, cond.Job, ji)
+						found, ok := resolveJobIndexExec(&execJobs, p.Pipeline.Jobs, cond.Job, ji)
 						if !ok {
 							msg := fmt.Sprintf("goto_job target '%s' not found", cond.Job)
 							fmt.Fprintln(os.Stderr, msg)
@@ -672,7 +601,7 @@ func RunWithArgs(args []string) (rc int) {
 								writeLog(msg)
 								return 6
 							}
-							found, ok := resolveJobIndex(&execJobs, p.Pipeline.Jobs, w.Job, ji)
+							found, ok := resolveJobIndexExec(&execJobs, p.Pipeline.Jobs, w.Job, ji)
 							if !ok {
 								msg := fmt.Sprintf("goto_job target '%s' not found", w.Job)
 								fmt.Fprintln(os.Stderr, msg)
@@ -724,7 +653,7 @@ func RunWithArgs(args []string) (rc int) {
 						writeLog(msg)
 						return 6
 					}
-					found, ok := resolveJobIndex(&execJobs, p.Pipeline.Jobs, step.ElseJob, ji)
+					found, ok := resolveJobIndexExec(&execJobs, p.Pipeline.Jobs, step.ElseJob, ji)
 					if !ok {
 						msg := fmt.Sprintf("else goto_job target '%s' not found", step.ElseJob)
 						fmt.Fprintln(os.Stderr, msg)
@@ -777,7 +706,7 @@ func RunWithArgs(args []string) (rc int) {
 						writeLog(msg)
 						return 6
 					}
-					found, ok := resolveJobIndex(&execJobs, p.Pipeline.Jobs, step.OnTimeoutJob, ji)
+					found, ok := resolveJobIndexExec(&execJobs, p.Pipeline.Jobs, step.OnTimeoutJob, ji)
 					if !ok {
 						msg := fmt.Sprintf("on_timeout goto_job target '%s' not found", step.OnTimeoutJob)
 						fmt.Fprintln(os.Stderr, msg)
@@ -819,259 +748,11 @@ func RunWithArgs(args []string) (rc int) {
 	return 0
 }
 
-func parseEnvFile(path string) (map[string]string, error) {
-	out := map[string]string{}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if !strings.Contains(line, "=") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		key := strings.TrimSpace(parts[0])
-		val := strings.TrimSpace(parts[1])
-		// strip surrounding quotes if present
-		if strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"") {
-			val = strings.Trim(val, "\"")
-		}
-		out[key] = val
-	}
-	if scanner.Err() != nil {
-		return nil, scanner.Err()
-	}
-	return out, nil
-}
+// parseEnvFile and interpolate were moved to helpers.go during the
+// refactor to keep main.go focused on CLI and flow.
 
-func interpolate(tmpl string, vars map[string]string) string {
-	if tmpl == "" {
-		return tmpl
-	}
-	res := tmpl
-	for k, v := range vars {
-		// support {{KEY}} and {{ KEY }} and {{.KEY}}
-		res = strings.ReplaceAll(res, "{{"+k+"}}", v)
-		res = strings.ReplaceAll(res, "{{ "+k+" }}", v)
-		res = strings.ReplaceAll(res, "{{."+k+"}}", v)
-		res = strings.ReplaceAll(res, "{{ ."+k+" }}", v)
-	}
-	return res
-}
-
-// resolveJobIndex looks for `target` in the current execJobs slice. If not
-// found, it searches the full list of declared jobs `allJobs`. If the target
-// exists in `allJobs` but not in `execJobs`, it appends the job to
-// `execJobs` and returns its new index. Returns (index, true) if found,
-// (-1, false) otherwise.
-// resolveJobIndex looks for `target` in the current execJobs slice. If not
-// found, it searches the full list of declared jobs `allJobs`. If the target
-// exists in `allJobs` but not in `execJobs`, it inserts the job immediately
-// after the given `insertAfter` index so execution will return to the
-// original sequence afterwards. Returns (index, true) if found,
-// (-1, false) otherwise.
-func resolveJobIndex(execJobs *[]Job, allJobs []Job, target string, insertAfter int) (int, bool) {
-	for i := range *execJobs {
-		if (*execJobs)[i].Name == target {
-			return i, true
-		}
-	}
-	for _, j := range allJobs {
-		if j.Name == target {
-			// insert j after insertAfter (clamp bounds)
-			pos := insertAfter + 1
-			if pos < 0 {
-				pos = 0
-			}
-			if pos > len(*execJobs) {
-				pos = len(*execJobs)
-			}
-			// perform insert
-			*execJobs = append((*execJobs)[:pos], append([]Job{j}, (*execJobs)[pos:]...)...)
-			return pos, true
-		}
-	}
-	return -1, false
-}
-
-// runLocalCommand runs the given command line via a shell and returns the
-// process exit code and an error (if any). It supports a total `timeout`
-// and an `idleTimeout` which cancels the command if no stdout/stderr
-// activity is observed for the duration. On timeout the function returns
-// exit code 124.
-func runLocalCommand(cmdLine string, timeout time.Duration, idleTimeout time.Duration, stdout io.Writer, stderr io.Writer) (int, error) {
-	var cmd *exec.Cmd
-	sh := runtimeShell
-	if sh == "" {
-		if runtime.GOOS == "windows" {
-			sh = "cmd"
-		} else {
-			sh = "sh"
-		}
-	}
-
-	// create a cancellable context for the command (total timeout support)
-	cmdCtx, cancel := context.WithCancel(context.Background())
-	if timeout > 0 {
-		var toCancel context.CancelFunc
-		cmdCtx, toCancel = context.WithTimeout(context.Background(), timeout)
-		// wrap cancel so we call both
-		prevCancel := cancel
-		cancel = func() {
-			toCancel()
-			prevCancel()
-		}
-	}
-	defer cancel()
-
-	// build command using context so exec kills on ctx cancel where supported
-	switch strings.ToLower(sh) {
-	case "cmd":
-		cmd = exec.CommandContext(cmdCtx, "cmd", "/C", cmdLine)
-	case "powershell":
-		cmd = exec.CommandContext(cmdCtx, "powershell", "-NoProfile", "-Command", cmdLine)
-	default:
-		cmd = exec.CommandContext(cmdCtx, "/bin/sh", "-lc", cmdLine)
-	}
-
-	// ensure children are placed in their own process group on Unix so we
-	// can kill the entire group on timeout.
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
-
-	// use pipes so we can observe stdout/stderr activity for the idle timer
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return 1, err
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return 1, err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return 1, err
-	}
-
-	activity := make(chan struct{}, 1)
-	// helper to copy and notify activity
-	copyNotify := func(r io.ReadCloser, w io.Writer) {
-		defer r.Close()
-		buf := make([]byte, 4096)
-		for {
-			n, err := r.Read(buf)
-			if n > 0 {
-				// write to provided writer (this may be a bytes.Buffer)
-				w.Write(buf[:n])
-				// notify activity (non-blocking)
-				select {
-				case activity <- struct{}{}:
-				default:
-				}
-			}
-			if err != nil {
-				if err == io.EOF {
-					return
-				}
-				return
-			}
-		}
-	}
-
-	go copyNotify(stdoutPipe, stdout)
-	go copyNotify(stderrPipe, stderr)
-
-	// monitor idle timeout, ctx.Done, and cmd completion
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-
-	timedOut := false
-	var waitErr error
-	if idleTimeout > 0 {
-		idleTimer := time.NewTimer(idleTimeout)
-		defer idleTimer.Stop()
-		for {
-			select {
-			case <-activity:
-				if !idleTimer.Stop() {
-					select {
-					case <-idleTimer.C:
-					default:
-					}
-				}
-				idleTimer.Reset(idleTimeout)
-			case <-idleTimer.C:
-				// idle timeout fired
-				timedOut = true
-				cancel()
-				// attempt to kill process group (Unix) or process (Windows)
-				if cmd.Process != nil {
-					if runtime.GOOS != "windows" {
-						// negative pid indicates pgid
-						_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-					} else {
-						// On Windows try to kill the whole process tree using taskkill
-						if cmd.Process != nil {
-							_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
-						}
-					}
-				}
-				// wait for command to exit
-				waitErr = <-done
-				goto AFTER_WAIT
-			case <-cmdCtx.Done():
-				// total timeout or cancel
-				waitErr = <-done
-				goto AFTER_WAIT
-			case err := <-done:
-				waitErr = err
-				goto AFTER_WAIT
-			}
-		}
-	} else {
-		// no idle timer: just wait for completion or ctx.Done
-		select {
-		case <-cmdCtx.Done():
-			// canceled/timeout
-			timedOut = cmdCtx.Err() == context.DeadlineExceeded
-			if cmd.Process != nil {
-				if runtime.GOOS != "windows" {
-					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				} else {
-					_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
-				}
-			}
-			waitErr = <-done
-		case err := <-done:
-			waitErr = err
-		}
-	}
-
-AFTER_WAIT:
-	if waitErr == nil {
-		return 0, nil
-	}
-	// treat ctx deadline exceeded or our timedOut as exit code 124
-	if timedOut || (cmdCtx.Err() == context.DeadlineExceeded) {
-		return 124, waitErr
-	}
-	// try to extract exit code from *exec.ExitError
-	if ee, ok := waitErr.(*exec.ExitError); ok {
-		if status, ok2 := ee.Sys().(interface{ ExitStatus() int }); ok2 {
-			return status.ExitStatus(), waitErr
-		}
-	}
-	return 1, waitErr
-}
+// resolveJobIndex and runLocalCommand were moved to exec.go as
+// resolveJobIndexExec and runLocalCommandExec respectively.
 
 // printHelp prints a short usage message describing global flags and
 // subcommands. It's invoked when the user passes -h or --help anywhere on
