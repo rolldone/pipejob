@@ -160,6 +160,41 @@ This mirrors the behaviour used in the main `pipeline` tool: keep an in‑memory
 
 If you want logs regardless of success/failure, use `--persist-logs DIR` to stream logs live into a directory you control.
 
+Silent printing (per-step and global)
+------------------------------------
+
+`pipejob` supports silencing noisy steps in two ways:
+
+- Per-step: set `silent: true` on a step to suppress printing the command line, stdout/stderr echoes, and per-step inline error messages while still recording logs in the runner's in‑memory buffer (flushed on error). This is useful for noisy helpers whose output you don't need to see on the terminal.
+
+- Global flag: pass `--silent` to the `pipejob` command to disable all per-step prints by default. This global flag suppresses the same per-step prints as `silent: true`. Note that job headers and critical runner errors (invalid YAML/conditions, missing targets, etc.) still print so you can diagnose failures.
+
+Examples:
+
+```bash
+./pipejob --silent examples/sim-continue.yaml
+# or place the flag after the YAML file; flags are positional-agnostic:
+./pipejob examples/sim-continue.yaml --silent
+```
+
+Per-step example (keep the global default but silence a single step):
+
+```yaml
+steps:
+  - name: noisy
+    type: command
+    command: ./generate-lots-of-output.sh
+    silent: true
+
+  - name: next
+    type: command
+    command: echo done
+```
+
+Notes:
+- `--silent` is a convenience to quickly hide noisy step output during local runs; if you want a mixed policy (some steps silent, some noisy) omit `--silent` and use the per-step `silent: true` only on the noisy steps.
+- If you still need full logs while running silently, use `--persist-logs DIR` to stream logs to disk.
+
 Shell / Windows behaviour
 -------------------------
 

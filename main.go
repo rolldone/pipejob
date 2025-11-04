@@ -20,6 +20,10 @@ import (
 // runtimeShell holds an optional shell override (sh|cmd|powershell).
 // When empty the runner auto-detects based on runtime.GOOS.
 var runtimeShell string
+// globalSilent when true suppresses per-step prints (command lines,
+// stdout/stderr echoes, and inline per-step error prints). It is set by
+// the global `--silent` flag.
+var globalSilent bool
 
 // Minimal types matching the sample job YAML. We only support the fields
 // required for local command execution.
@@ -43,6 +47,7 @@ type Step struct {
 	Command    string   `yaml:"command"`
 	Commands   []string `yaml:"commands"`
 	SaveOutput string   `yaml:"save_output"`
+	Silent     bool     `yaml:"silent"`
 	Conditions []struct {
 		Pattern string `yaml:"pattern"`
 		Action  string `yaml:"action"`
@@ -93,6 +98,11 @@ func RunWithArgs(args []string) (rc int) {
 	cleaned := make([]string, 0, len(args))
 	for i := 0; i < len(args); {
 		a := args[i]
+		// help flag anywhere should display usage and exit
+		if a == "--help" || a == "-h" {
+			printHelp()
+			return 0
+		}
 		if strings.HasPrefix(a, "--var=") {
 			cliVars.Set(strings.TrimPrefix(a, "--var="))
 			i++
@@ -158,6 +168,17 @@ func RunWithArgs(args []string) (rc int) {
 			}
 			fmt.Fprintln(os.Stderr, "--persist-logs requires an argument")
 			return 2
+		}
+		if strings.HasPrefix(a, "--silent=") {
+			v := strings.TrimPrefix(a, "--silent=")
+			globalSilent = !(v == "false" || v == "0")
+			i++
+			continue
+		}
+		if a == "--silent" {
+			globalSilent = true
+			i++
+			continue
 		}
 		// unknown or positional -> keep
 		cleaned = append(cleaned, a)
@@ -423,7 +444,9 @@ func RunWithArgs(args []string) (rc int) {
 			errOccurred := false
 			for _, c := range cmds {
 				rc := interpolate(c, vars)
-				fmt.Printf("-> %s\n", rc)
+				if !(globalSilent || step.Silent) {
+					fmt.Printf("-> %s\n", rc)
+				}
 				writeLog("CMD: " + rc)
 				// capture output
 				var outBuf bytes.Buffer
@@ -431,14 +454,18 @@ func RunWithArgs(args []string) (rc int) {
 				lastExitCode = exitCode
 				if err != nil {
 					msg := fmt.Sprintf("command failed: %v", err)
-					fmt.Fprintln(os.Stderr, msg)
+					if !(globalSilent || step.Silent) {
+						fmt.Fprintln(os.Stderr, msg)
+					}
 					writeLog(msg)
 					// don't immediately return: allow conditions to inspect exit code
 					errOccurred = true
 				}
 				combinedOut.Write(outBuf.Bytes())
-				// still echo to stdout for user visibility
-				os.Stdout.Write(outBuf.Bytes())
+				// still echo to stdout for user visibility (unless silenced)
+				if !(globalSilent || step.Silent) {
+					os.Stdout.Write(outBuf.Bytes())
+				}
 			}
 
 			outStr := combinedOut.String()
@@ -656,7 +683,9 @@ func RunWithArgs(args []string) (rc int) {
 					ji = found - 1
 				case "fail":
 					msg := fmt.Sprintf("step %s failed due to else_action", step.Name)
-					fmt.Fprintln(os.Stderr, msg)
+					if !(globalSilent || step.Silent) {
+						fmt.Fprintln(os.Stderr, msg)
+					}
 					writeLog(msg)
 					return 7
 				default:
@@ -764,4 +793,26 @@ func runLocalCommand(cmdLine string, stdout io.Writer, stderr io.Writer) (int, e
 	}
 	// fallback to generic non-zero
 	return 1, err
+}
+
+// printHelp prints a short usage message describing global flags and
+// subcommands. It's invoked when the user passes -h or --help anywhere on
+// the command line.
+func printHelp() {
+	fmt.Println("Usage: pipejob <job.yaml> [flags]")
+	fmt.Println()
+	fmt.Println("Global flags:")
+	fmt.Println("  --env-file PATH      Path to .env file (default: .env)")
+	fmt.Println("  --var KEY=VAL        Set a variable (repeatable). Flags can appear anywhere")
+	fmt.Println("  --dry-run            Render commands without executing them")
+	fmt.Println("  --persist-logs DIR   Stream logs live to DIR (keeps logs)")
+	fmt.Println("  --shell <sh|cmd|powershell>  Override shell used to run commands")
+	fmt.Println("  --silent             Suppress per-step prints (command lines and stdout/stderr echoes)")
+	fmt.Println()
+	fmt.Println("Subcommands:")
+	fmt.Println("  new <out.yaml>       Generate a minimal example pipeline YAML")
+	fmt.Println()
+	fmt.Println("Notes:")
+	fmt.Println("  - Flags are positional-agnostic: they can appear before or after the YAML file.")
+	fmt.Println("  - Use --persist-logs if you need full logs even on successful runs.")
 }
