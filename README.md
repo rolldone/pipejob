@@ -55,58 +55,58 @@ Examples:
 
 ```yaml
 steps:
-	- name: check
-	  type: command
-	  command: 'echo "hello world"'
-	  when:
-	    - contains: "hello"
-		  action: "goto_step"
-		  step: "success"
-	- name: success
-	  type: command
-	  command: 'echo "CONTAINS_OK"'
+  - name: check
+    type: command
+    command: 'echo "hello world"'
+    when:
+      - contains: "hello"
+        action: "goto_step"
+        step: "success"
+  - name: success
+    type: command
+    command: 'echo "CONTAINS_OK"'
 ```
 
 2) equals → continue
 
 ```yaml
 steps:
-	- name: exact
-	  type: command
-	  command: 'echo "EXACT"'
-	  when:
-		- equals: "EXACT"
-		  action: "continue"
-	- name: next
-	  type: command
-	  command: 'echo "EQUALS_OK"'
+  - name: exact
+    type: command
+    command: 'echo "EXACT"'
+    when:
+      - equals: "EXACT"
+        action: "continue"
+  - name: next
+    type: command
+    command: 'echo "EQUALS_OK"'
 ```
 
 3) regex and exit_code examples
 
 ```yaml
 steps:
-	- name: regex
-	  type: command
-	  command: 'echo "val: 123"'
-	  when:
-		- regex: "val: ([0-9]+)"
-		  action: "goto_step"
-		  step: "got"
-	- name: got
-	  type: command
-	  command: 'echo "REGEX_OK"'
+  - name: regex
+    type: command
+    command: 'echo "val: 123"'
+    when:
+      - regex: "val: ([0-9]+)"
+        action: "goto_step"
+        step: "got"
+  - name: got
+    type: command
+    command: 'echo "REGEX_OK"'
 
-	- name: exitcheck
-	  type: command
-	  command: 'bash -c "exit 42"'
-	  when:
-		- exit_code: 42
-		  action: "goto_step"
-		  step: "exit_ok"
-	- name: exit_ok
-	  type: command
-	  command: 'echo "EXIT42_OK"'
+  - name: exitcheck
+    type: command
+    command: 'bash -c "exit 42"'
+    when:
+      - exit_code: 42
+        action: "goto_step"
+        step: "exit_ok"
+  - name: exit_ok
+    type: command
+    command: 'echo "EXIT42_OK"'
 ```
 
 Notes:
