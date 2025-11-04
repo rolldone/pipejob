@@ -20,6 +20,7 @@ import (
 // runtimeShell holds an optional shell override (sh|cmd|powershell).
 // When empty the runner auto-detects based on runtime.GOOS.
 var runtimeShell string
+
 // globalSilent when true suppresses per-step prints (command lines,
 // stdout/stderr echoes, and inline per-step error prints). It is set by
 // the global `--silent` flag.
@@ -444,9 +445,10 @@ func RunWithArgs(args []string) (rc int) {
 			errOccurred := false
 			for _, c := range cmds {
 				rc := interpolate(c, vars)
-				if !(globalSilent || step.Silent) {
-					fmt.Printf("-> %s\n", rc)
-				}
+				// Always print the command being executed so runs are traceable;
+				// `silent` only hides the command output (stdout/stderr) and
+				// inline per-step error messages, not the command itself.
+				fmt.Printf("-> %s\n", rc)
 				writeLog("CMD: " + rc)
 				// capture output
 				var outBuf bytes.Buffer

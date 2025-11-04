@@ -165,9 +165,9 @@ Silent printing (per-step and global)
 
 `pipejob` supports silencing noisy steps in two ways:
 
-- Per-step: set `silent: true` on a step to suppress printing the command line, stdout/stderr echoes, and per-step inline error messages while still recording logs in the runner's in‑memory buffer (flushed on error). This is useful for noisy helpers whose output you don't need to see on the terminal.
+-- Per-step: set `silent: true` on a step to suppress printing the command output (stdout/stderr) and per-step inline error messages while still recording logs in the runner's in‑memory buffer (flushed on error). The command being executed (the `-> <cmd>` line) is still printed so runs are traceable.
 
-- Global flag: pass `--silent` to the `pipejob` command to disable all per-step prints by default. This global flag suppresses the same per-step prints as `silent: true`. Note that job headers and critical runner errors (invalid YAML/conditions, missing targets, etc.) still print so you can diagnose failures.
+-- Global flag: pass `--silent` to the `pipejob` command to suppress per-step command output (stdout/stderr) and per-step inline error prints by default. The command lines (`-> <cmd>`) remain visible so you can trace which commands ran. Job headers and critical runner errors (invalid YAML/conditions, missing targets, etc.) still print so you can diagnose failures.
 
 Examples:
 
