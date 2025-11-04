@@ -1,5 +1,0 @@
-=== ERROR EVIDENCE (last ~300KB) ===
-== Job: job1 ==
-CMD: sh -c 'echo start job1; sleep 2; echo end job1'
-command failed: signal: killed
-on_timeout goto_job target 'job2' not found

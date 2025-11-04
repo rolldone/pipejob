@@ -1,5 +1,0 @@
-=== ERROR EVIDENCE (last ~300KB) ===
-== Job: job1 ==
-CMD: sh -c 'echo started; sleep 5; echo done'
-command failed: signal: killed
-step slow-step command(s) returned non-zero exit and no condition matched

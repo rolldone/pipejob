@@ -1,0 +1,5 @@
+.sync_temp/
+# Local built binary
+pipejob
+# Persist example artifacts
+*.log
