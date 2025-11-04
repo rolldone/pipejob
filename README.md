@@ -357,6 +357,11 @@ Rules and behavior:
 - If you use a `pipeline.runs` ordering list, `goto_job` will resolve job names against the effective execution order (it must exist in that list or among declared jobs).
 - Step names are resolved only within their job; they do not need to be globally unique across jobs.
 
+Additional goto_job behavior:
+
+ - If a `goto_job` names a job that is not present in the effective execution order (`pipeline.runs`), `pipejob` will look for that job in the declared `jobs:` list. If found, the runner will insert the target job immediately after the current job and transfer execution there. After the inserted job finishes, execution continues with the remaining jobs from the original `runs` order. Note: this insertion may cause the same job to run twice if it also appears later in `pipeline.runs`.
+
+
 Examples:
 
 1) `goto_step` from a `when` rule:

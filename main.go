@@ -542,14 +542,8 @@ func RunWithArgs(args []string) (rc int) {
 							return 6
 						}
 						// find job index in execJobs
-						found := -1
-						for k := range execJobs {
-							if execJobs[k].Name == cond.Job {
-								found = k
-								break
-							}
-						}
-						if found == -1 {
+						found, ok := resolveJobIndex(&execJobs, p.Pipeline.Jobs, cond.Job, ji)
+						if !ok {
 							msg := fmt.Sprintf("goto_job target '%s' not found", cond.Job)
 							fmt.Fprintln(os.Stderr, msg)
 							writeLog(msg)
@@ -634,14 +628,8 @@ func RunWithArgs(args []string) (rc int) {
 								writeLog(msg)
 								return 6
 							}
-							found := -1
-							for k := range execJobs {
-								if execJobs[k].Name == w.Job {
-									found = k
-									break
-								}
-							}
-							if found == -1 {
+							found, ok := resolveJobIndex(&execJobs, p.Pipeline.Jobs, w.Job, ji)
+							if !ok {
 								msg := fmt.Sprintf("goto_job target '%s' not found", w.Job)
 								fmt.Fprintln(os.Stderr, msg)
 								writeLog(msg)
@@ -692,14 +680,8 @@ func RunWithArgs(args []string) (rc int) {
 						writeLog(msg)
 						return 6
 					}
-					found := -1
-					for k := range execJobs {
-						if execJobs[k].Name == step.ElseJob {
-							found = k
-							break
-						}
-					}
-					if found == -1 {
+					found, ok := resolveJobIndex(&execJobs, p.Pipeline.Jobs, step.ElseJob, ji)
+					if !ok {
 						msg := fmt.Sprintf("else goto_job target '%s' not found", step.ElseJob)
 						fmt.Fprintln(os.Stderr, msg)
 						writeLog(msg)
@@ -751,14 +733,8 @@ func RunWithArgs(args []string) (rc int) {
 						writeLog(msg)
 						return 6
 					}
-					found := -1
-					for k := range execJobs {
-						if execJobs[k].Name == step.OnTimeoutJob {
-							found = k
-							break
-						}
-					}
-					if found == -1 {
+					found, ok := resolveJobIndex(&execJobs, p.Pipeline.Jobs, step.OnTimeoutJob, ji)
+					if !ok {
 						msg := fmt.Sprintf("on_timeout goto_job target '%s' not found", step.OnTimeoutJob)
 						fmt.Fprintln(os.Stderr, msg)
 						writeLog(msg)
@@ -843,6 +819,41 @@ func interpolate(tmpl string, vars map[string]string) string {
 		res = strings.ReplaceAll(res, "{{ ."+k+" }}", v)
 	}
 	return res
+}
+
+// resolveJobIndex looks for `target` in the current execJobs slice. If not
+// found, it searches the full list of declared jobs `allJobs`. If the target
+// exists in `allJobs` but not in `execJobs`, it appends the job to
+// `execJobs` and returns its new index. Returns (index, true) if found,
+// (-1, false) otherwise.
+// resolveJobIndex looks for `target` in the current execJobs slice. If not
+// found, it searches the full list of declared jobs `allJobs`. If the target
+// exists in `allJobs` but not in `execJobs`, it inserts the job immediately
+// after the given `insertAfter` index so execution will return to the
+// original sequence afterwards. Returns (index, true) if found,
+// (-1, false) otherwise.
+func resolveJobIndex(execJobs *[]Job, allJobs []Job, target string, insertAfter int) (int, bool) {
+	for i := range *execJobs {
+		if (*execJobs)[i].Name == target {
+			return i, true
+		}
+	}
+	for _, j := range allJobs {
+		if j.Name == target {
+			// insert j after insertAfter (clamp bounds)
+			pos := insertAfter + 1
+			if pos < 0 {
+				pos = 0
+			}
+			if pos > len(*execJobs) {
+				pos = len(*execJobs)
+			}
+			// perform insert
+			*execJobs = append((*execJobs)[:pos], append([]Job{j}, (*execJobs)[pos:]...)...)
+			return pos, true
+		}
+	}
+	return -1, false
 }
 
 // runLocalCommand runs the given command line under /bin/sh -lc and returns
