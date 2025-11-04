@@ -142,6 +142,24 @@ Log behavior
 ------------
 By default `pipejob` creates a temporary workspace (`.sync_temp/pipejob-<timestamp>`) and removes it on success. That means a successful run that used `drop` may not leave an inspectable `run.log` unless you specify `--persist-logs DIR`. Use `--persist-logs` to keep the temp workspace or a directory of your choice for debugging.
 
+Error‑evidence buffer (IO‑sparing behavior)
+-----------------------------------------
+
+To reduce disk I/O for successful local runs, `pipejob` keeps recent output in an in‑memory bounded buffer (approximately 300 KB). The runner only writes that buffer to disk when one of the following happens:
+
+- the run exits with a non‑zero status (an error occurred), or
+- the user explicitly passes `--persist-logs DIR` (logs are written live to the specified directory).
+
+When an error causes the buffer to be flushed, `pipejob` creates a small temp workspace under `.sync_temp/pipejob-<timestamp>/` and writes `run.log` containing an "ERROR EVIDENCE" header followed by the last ~300 KB of output. It also prints a short notification to stderr, for example:
+
+```
+pipejob: logs preserved at .sync_temp/pipejob-20251104-072132
+```
+
+This mirrors the behaviour used in the main `pipeline` tool: keep an in‑memory history for debugging, avoid writing logs for the common successful case, and preserve recent output only when debugging is needed.
+
+If you want logs regardless of success/failure, use `--persist-logs DIR` to stream logs live into a directory you control.
+
 else_action and how it relates to conditions/when
 -----------------------------------------------
 

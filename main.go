@@ -200,9 +200,11 @@ func RunWithArgs(args []string) (rc int) {
 		}
 	}
 
-	// log buffer (in-memory). If persistLogs is set we also create a
-	// file and stream into it during execution.
-	var logBuf bytes.Buffer
+	// in-memory bounded log buffer (ring-like): we keep up to logCap
+	// bytes of the most recent log output. This mimics the pipeline's
+	// error-evidence buffer and avoids writing logs to disk on success.
+	const logCap = 307200 // 300 KB
+	var logBuf []byte
 	logPath := filepath.Join(tempDir, "run.log")
 	var lf *os.File
 	if persistLogs != "" {
@@ -215,10 +217,24 @@ func RunWithArgs(args []string) (rc int) {
 		defer lf.Close()
 	}
 
+	// appendToBuf appends data to the in-memory buffer and truncates the
+	// front if we exceed the capacity (keep the last logCap bytes).
+	appendToBuf := func(b []byte) {
+		if len(b) == 0 {
+			return
+		}
+		logBuf = append(logBuf, b...)
+		if len(logBuf) > logCap {
+			// keep only the trailing logCap bytes
+			logBuf = logBuf[len(logBuf)-logCap:]
+		}
+	}
+
 	writeLog := func(s string) {
-		logBuf.WriteString(s + "\n")
+		line := []byte(s + "\n")
+		appendToBuf(line)
 		if lf != nil {
-			lf.WriteString(s + "\n")
+			lf.Write(line)
 		}
 	}
 
@@ -243,7 +259,10 @@ func RunWithArgs(args []string) (rc int) {
 				fmt.Fprintf(os.Stderr, "failed to create log file %s: %v\n", logPath, err)
 				return
 			}
-			_, _ = lf2.Write(logBuf.Bytes())
+			// prepend an error-evidence header similar to pipeline logs
+			header := []byte("=== ERROR EVIDENCE (last ~300KB) ===\n")
+			_, _ = lf2.Write(header)
+			_, _ = lf2.Write(logBuf)
 			_ = lf2.Close()
 			fmt.Fprintf(os.Stderr, "pipejob: logs preserved at %s\n", tempDir)
 			return
