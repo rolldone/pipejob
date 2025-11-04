@@ -141,3 +141,142 @@ Drop vs Fail
 Log behavior
 ------------
 By default `pipejob` creates a temporary workspace (`.sync_temp/pipejob-<timestamp>`) and removes it on success. That means a successful run that used `drop` may not leave an inspectable `run.log` unless you specify `--persist-logs DIR`. Use `--persist-logs` to keep the temp workspace or a directory of your choice for debugging.
+
+else_action and how it relates to conditions/when
+-----------------------------------------------
+
+Each step may optionally declare an `else_action` (and target fields `else_step` / `else_job`) which is used when none of the `conditions` or `when` rules matched. The evaluation order is:
+
+1. legacy `conditions` (regex patterns)
+2. `when` DSL rules (contains/equals/regex/exit_code)
+3. `else_action` if no condition matched
+
+This makes `else_action` useful for defining a default path when a command didn't produce any matched outputs or the exit code didn't match any `when` rules. Supported values are the same actions used by `conditions`/`when`:
+
+- `continue` — proceed to the next step
+- `drop` — stop the pipeline and return success (exit code 0)
+- `goto_step` — jump to another step in the same job (requires `else_step`)
+- `goto_job` — jump to another job in the pipeline (requires `else_job`)
+- `fail` — stop the pipeline and return failure (currently exit code 7)
+
+Examples
+
+1) Default to dropping (success) when nothing matched:
+
+```yaml
+steps:
+  - name: maybe
+    type: command
+    command: ls vadfvfv
+    when:
+      - exit_code: 0
+        action: continue
+    else_action: drop   # if ls fails (non-zero) and no when matched -> treat as success
+```
+
+2) Default to failing but jump to recovery step if specified:
+
+```yaml
+steps:
+  - name: check
+    type: command
+    command: ./check.sh
+    when:
+      - contains: "OK"
+        action: continue
+    else_action: goto_step
+    else_step: recover
+
+  - name: recover
+    type: command
+    command: ./recover.sh
+```
+
+Notes:
+- `else_action` only runs when no `conditions` or `when` entries matched the output/exit code.
+- Use `else_step` or `else_job` to provide targets for `goto_step` or `goto_job`.
+- Because `drop` returns success and the default behavior removes temporary logs on success, you may want to use `--persist-logs` when you expect to inspect artifacts from a dropped run.
+
+goto_step, goto_job and target rules
+-----------------------------------
+
+The `goto_step` and `goto_job` actions allow you to jump the execution pointer to a different step within the same job (`goto_step`) or to a different job in the pipeline (`goto_job`). These actions can be used inside `conditions`, `when`, or as `else_action`.
+
+Rules and behavior:
+
+- `goto_step` requires a target step name in the same job. Use the `step` field with `conditions`/`when` or `else_step` when used with `else_action`.
+- `goto_job` requires a target job name. Use the `job` field with `conditions`/`when` or `else_job` when used with `else_action`.
+- If the specified target step or job is not found, `pipejob` will abort the run with an error (the tool currently returns exit code 6 in this case).
+- If you use a `pipeline.runs` ordering list, `goto_job` will resolve job names against the effective execution order (it must exist in that list or among declared jobs).
+- Step names are resolved only within their job; they do not need to be globally unique across jobs.
+
+Examples:
+
+1) `goto_step` from a `when` rule:
+
+```yaml
+steps:
+  - name: check
+    type: command
+    command: ./check.sh
+    when:
+      - contains: "SKIP_TO_DONE"
+        action: goto_step
+        step: done
+
+  - name: done
+    type: command
+    command: echo "DONE"
+```
+
+2) `goto_job` example (works with or without `pipeline.runs`):
+
+```yaml
+pipeline:
+  runs: [build, test, deploy]
+jobs:
+  - name: build
+    steps:
+      - name: maybe_skip
+        type: command
+        command: ./maybe.sh
+        when:
+          - contains: "SKIP_TESTS"
+            action: goto_job
+            job: deploy
+
+  - name: test
+    steps:
+      - name: run_tests
+        type: command
+        command: ./run_tests.sh
+
+  - name: deploy
+    steps:
+      - name: do_deploy
+        type: command
+        command: ./deploy.sh
+```
+
+3) `else_action` using `else_step` / `else_job`:
+
+```yaml
+steps:
+  - name: check_or_recover
+    type: command
+    command: ./check.sh
+    when:
+      - contains: "OK"
+        action: continue
+    else_action: goto_step
+    else_step: recover
+
+  - name: recover
+    type: command
+    command: ./recover.sh
+```
+
+Implementation notes:
+
+- The runner resolves step targets by name and sets the internal loop indices accordingly (so the next iteration begins at the requested step/job). If a target is missing you will see a clear error in stderr and the run will abort.
+- Use `goto_job` sparingly: it changes the outer job execution pointer and can make control flow harder to follow. Prefer explicit `pipeline.runs` ordering and small, well-named steps.
