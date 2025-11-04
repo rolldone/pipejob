@@ -368,6 +368,13 @@ Additional goto_job behavior:
 
  - If a `goto_job` names a job that is not present in the effective execution order (`pipeline.runs`), `pipejob` will look for that job in the declared `jobs:` list. If found, the runner will insert the target job immediately after the current job and transfer execution there. After the inserted job finishes, execution continues with the remaining jobs from the original `runs` order. Note: this insertion may cause the same job to run twice if it also appears later in `pipeline.runs`.
 
+Additional resume behavior:
+
+ - When a `goto_job` is triggered from inside a job (for example from a `when` rule, legacy `conditions`, or as an `else_action`), `pipejob` will by default treat the jump as a temporary detour: it transfers execution to the target job immediately, and after the target job completes it resumes the remaining steps from the original job.
+ - To implement this the runner inserts a one‑off "resume" job at runtime containing only the remaining steps from the original job. The resume job is executed exactly once and then discarded. The generated resume job name follows the pattern `<original>-resume-<timestamp>` (timestamp in nanoseconds) and will appear in logs for traceability.
+ - If you do not want this detour-and-return behavior (i.e., you want a permanent transfer where the original job's remaining steps are skipped), let me know and we can add an explicit flag or alternate action (for example `goto_job.permanent: true` or a separate `call_job` action) to support that semantic.
+
+
 
 Examples:
 
