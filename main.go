@@ -75,7 +75,7 @@ func main() {
 }
 
 // RunWithArgs implements the CLI behavior and returns an exit code.
-func RunWithArgs(args []string) int {
+func RunWithArgs(args []string) (rc int) {
 	// support a simple generator: `pipejob new <out.yaml>`
 	if len(args) > 0 && args[0] == "new" {
 		newFs := flag.NewFlagSet("new", flag.ContinueOnError)
@@ -183,33 +183,73 @@ func RunWithArgs(args []string) int {
 		vars[parts[0]] = parts[1]
 	}
 
-	// Prepare temp workspace
+	// Prepare temp workspace name. We avoid creating the temp dir or log
+	// file unless needed to minimize IO. Logs are buffered in-memory and
+	// only written to disk when (a) the user requested `--persist-logs` or
+	// (b) the run exits non-zero (error) — this preserves logs by default on
+	// error while avoiding disk writes on successful runs.
 	ts := time.Now().Format("20060102-150405")
 	tempBase := ".sync_temp"
 	tempDir := filepath.Join(tempBase, "pipejob-"+ts)
 	if persistLogs != "" {
-		// use persist dir if requested
+		// use persist dir if requested; create it now so we can stream logs
 		tempDir = persistLogs
-	}
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create temp dir %s: %v\n", tempDir, err)
-		return 2
+		if err := os.MkdirAll(tempDir, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to create persist dir %s: %v\n", tempDir, err)
+			return 2
+		}
 	}
 
-	// simple run log
+	// log buffer (in-memory). If persistLogs is set we also create a
+	// file and stream into it during execution.
+	var logBuf bytes.Buffer
 	logPath := filepath.Join(tempDir, "run.log")
-	lf, _ := os.Create(logPath)
-	defer lf.Close()
-	writeLog := func(s string) {
-		lf.WriteString(s + "\n")
+	var lf *os.File
+	if persistLogs != "" {
+		f, err := os.Create(logPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to create log file %s: %v\n", logPath, err)
+			return 2
+		}
+		lf = f
+		defer lf.Close()
 	}
 
-	// On exit, cleanup unless persistLogs provided
-	if persistLogs == "" {
-		defer func() {
-			_ = os.RemoveAll(tempDir)
-		}()
+	writeLog := func(s string) {
+		logBuf.WriteString(s + "\n")
+		if lf != nil {
+			lf.WriteString(s + "\n")
+		}
 	}
+
+	// Cleanup / persist-on-error behavior: if the run exits non-zero and
+	// the user didn't request `--persist-logs`, create the temp dir and
+	// write the buffered log there so users can inspect failures. If the
+	// run is successful we skip writing logs to avoid unnecessary IO.
+	defer func() {
+		// If user explicitly requested a persist dir, logs were already
+		// written there and we don't remove them.
+		if persistLogs != "" {
+			return
+		}
+		if rc != 0 {
+			// create temp dir and write buffered log
+			if err := os.MkdirAll(tempDir, 0755); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to create temp dir for logs %s: %v\n", tempDir, err)
+				return
+			}
+			lf2, err := os.Create(logPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to create log file %s: %v\n", logPath, err)
+				return
+			}
+			_, _ = lf2.Write(logBuf.Bytes())
+			_ = lf2.Close()
+			fmt.Fprintf(os.Stderr, "pipejob: logs preserved at %s\n", tempDir)
+			return
+		}
+		// success case: do not write logs (save IO) and do nothing
+	}()
 
 	// dry-run: print rendered steps and exit
 	if dryRun {
