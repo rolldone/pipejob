@@ -1,0 +1,9 @@
+pipeline:
+  name: test-silent-fail
+  jobs:
+    - name: job1
+      steps:
+        - name: check
+          type: command
+          silent: true
+          command: 'ls nosuchfile'

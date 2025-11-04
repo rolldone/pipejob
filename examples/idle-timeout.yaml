@@ -1,0 +1,15 @@
+pipeline:
+  name: idle-timeout-demo
+  jobs:
+    - name: job1
+      steps:
+        - name: slow-silent
+          type: command
+          command: "sleep 10"
+          timeout: "0s"
+          idle_timeout: "2s"
+          on_timeout: "goto_step"
+          on_timeout_step: "recover"
+        - name: recover
+          type: command
+          command: "echo recovered-after-idle"

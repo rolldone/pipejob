@@ -1,0 +1,8 @@
+=== ERROR EVIDENCE (last ~300KB) ===
+== Job: job1 ==
+CMD: sh -c 'echo start job1; sleep 2; echo end job1'
+command failed: signal: killed
+== Job: job2 ==
+CMD: echo recovery job2 (jumped from job1 on timeout)
+command failed: exit status 2
+step recovery command(s) returned non-zero exit and no condition matched

@@ -1,0 +1,15 @@
+pipeline:
+  name: sim-continue
+  jobs:
+    - name: job1
+      steps:
+        - name: will-fail
+          type: command
+          command: "sh -c 'echo step1 failing; exit 1'"
+          when:
+            - exit_code: 1
+              action: continue
+
+        - name: next-step
+          type: command
+          command: "echo 'I ran after the failing step and we continued'"

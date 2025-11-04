@@ -1,0 +1,8 @@
+pipeline:
+  name: test-vars
+  jobs:
+    - name: job1
+      steps:
+        - name: print
+          type: command
+          command: 'echo "task: {{task_id}} user: {{USER}}"'

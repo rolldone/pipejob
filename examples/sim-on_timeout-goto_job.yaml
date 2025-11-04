@@ -1,0 +1,28 @@
+pipeline:
+  name: on-timeout-goto-job
+  # specify runs: we'll include job1 and job3; job2 remains declared but not
+  # in the runs order to demonstrate goto_job can append/resolve it at runtime.
+  runs: [job1, job3]
+  jobs:
+    - name: job1
+      steps:
+        - name: slow
+          type: command
+          command: "sh -c 'echo start job1; sleep 2; echo end job1'"
+          timeout: "1s"
+          on_timeout: "goto_job"
+          on_timeout_job: "job2"
+
+    - name: job2
+      steps:
+        - name: recovery
+          type: command
+          command: "echo recovery job2 - jumped from job1 on timeout"
+          when:
+            - exit_code: 0
+              action: drop
+    - name: job3
+      steps:
+        - name: final
+          type: command
+          command: "echo job3 final step"

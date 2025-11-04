@@ -1,0 +1,5 @@
+=== ERROR EVIDENCE (last ~300KB) ===
+== Job: job1 ==
+CMD: ls nosuchfile
+command failed: exit status 2
+step check command(s) returned non-zero exit and no condition matched

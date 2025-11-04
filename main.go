@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
+	"syscall"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -75,6 +77,10 @@ type Step struct {
 	// (for example: "30s", "1m"). If set, the step's command will be
 	// killed when the timeout is reached and treated as a non-zero exit.
 	Timeout string `yaml:"timeout"`
+	// optional idle timeout: maximum duration with no stdout/stderr activity
+	// (for example: "30s", "1m"). If the command produces no output for
+	// this duration the step is killed and treated as a timeout (exit 124).
+	IdleTimeout string `yaml:"idle_timeout"`
 	// on_timeout is a shortcut action applied when the step hits its timeout.
 	// Supported values: continue, drop, goto_step, goto_job, fail
 	OnTimeout     string `yaml:"on_timeout"`
@@ -105,6 +111,7 @@ func RunWithArgs(args []string) (rc int) {
 	dryRun := false
 	persistLogs := ""
 	shellHint := "" // optional shell override: sh|cmd|powershell
+	var defaultIdleTimeoutStr string
 
 	cleaned := make([]string, 0, len(args))
 	for i := 0; i < len(args); {
@@ -156,6 +163,20 @@ func RunWithArgs(args []string) (rc int) {
 			persistLogs = strings.TrimPrefix(a, "--persist-logs=")
 			i++
 			continue
+		}
+		if strings.HasPrefix(a, "--idle-timeout=") {
+			defaultIdleTimeoutStr = strings.TrimPrefix(a, "--idle-timeout=")
+			i++
+			continue
+		}
+		if a == "--idle-timeout" {
+			if i+1 < len(args) {
+				defaultIdleTimeoutStr = args[i+1]
+				i += 2
+				continue
+			}
+			fmt.Fprintln(os.Stderr, "--idle-timeout requires an argument (Go duration, e.g. 2s)")
+			return 2
 		}
 		if strings.HasPrefix(a, "--shell=") {
 			shellHint = strings.TrimPrefix(a, "--shell=")
@@ -466,6 +487,29 @@ func RunWithArgs(args []string) (rc int) {
 				stepTimeout = d
 			}
 
+					// parse optional idle timeout
+					var stepIdleTimeout time.Duration
+					// step-level idle_timeout takes precedence; otherwise use global default if provided
+					if step.IdleTimeout != "" {
+						d, perr := time.ParseDuration(step.IdleTimeout)
+						if perr != nil {
+							msg := fmt.Sprintf("invalid idle_timeout '%s' in step %s: %v", step.IdleTimeout, step.Name, perr)
+							fmt.Fprintln(os.Stderr, msg)
+							writeLog(msg)
+							return 6
+						}
+						stepIdleTimeout = d
+					} else if defaultIdleTimeoutStr != "" {
+						d, perr := time.ParseDuration(defaultIdleTimeoutStr)
+						if perr != nil {
+							msg := fmt.Sprintf("invalid global --idle-timeout value '%s': %v", defaultIdleTimeoutStr, perr)
+							fmt.Fprintln(os.Stderr, msg)
+							writeLog(msg)
+							return 6
+						}
+						stepIdleTimeout = d
+					}
+
 			for _, c := range cmds {
 				rc := interpolate(c, vars)
 				// Always print the command being executed so runs are traceable;
@@ -475,7 +519,7 @@ func RunWithArgs(args []string) (rc int) {
 				writeLog("CMD: " + rc)
 				// capture output
 				var outBuf bytes.Buffer
-				exitCode, err := runLocalCommand(rc, stepTimeout, &outBuf, &outBuf)
+				exitCode, err := runLocalCommand(rc, stepTimeout, stepIdleTimeout, &outBuf, &outBuf)
 				lastExitCode = exitCode
 				if err != nil {
 					msg := fmt.Sprintf("command failed: %v", err)
@@ -856,9 +900,12 @@ func resolveJobIndex(execJobs *[]Job, allJobs []Job, target string, insertAfter 
 	return -1, false
 }
 
-// runLocalCommand runs the given command line under /bin/sh -lc and returns
-// the process exit code and an error (if any). Exit code is 0 on success.
-func runLocalCommand(cmdLine string, timeout time.Duration, stdout io.Writer, stderr io.Writer) (int, error) {
+// runLocalCommand runs the given command line via a shell and returns the
+// process exit code and an error (if any). It supports a total `timeout`
+// and an `idleTimeout` which cancels the command if no stdout/stderr
+// activity is observed for the duration. On timeout the function returns
+// exit code 124.
+func runLocalCommand(cmdLine string, timeout time.Duration, idleTimeout time.Duration, stdout io.Writer, stderr io.Writer) (int, error) {
 	var cmd *exec.Cmd
 	sh := runtimeShell
 	if sh == "" {
@@ -868,59 +915,162 @@ func runLocalCommand(cmdLine string, timeout time.Duration, stdout io.Writer, st
 			sh = "sh"
 		}
 	}
-	// If a timeout is requested, use a context so the process can be
-	// canceled when the deadline is reached.
-	var cmdCtx context.Context
-	var cancel func()
-	if timeout > 0 {
-		cmdCtx, cancel = context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-	} else {
-		cmdCtx = context.Background()
-	}
 
-	// build command with context when supported
+	// create a cancellable context for the command (total timeout support)
+	cmdCtx, cancel := context.WithCancel(context.Background())
+	if timeout > 0 {
+		var toCancel context.CancelFunc
+		cmdCtx, toCancel = context.WithTimeout(context.Background(), timeout)
+		// wrap cancel so we call both
+		prevCancel := cancel
+		cancel = func() {
+			toCancel()
+			prevCancel()
+		}
+	}
+	defer cancel()
+
+	// build command using context so exec kills on ctx cancel where supported
 	switch strings.ToLower(sh) {
 	case "cmd":
-		if timeout > 0 {
-			cmd = exec.CommandContext(cmdCtx, "cmd", "/C", cmdLine)
-		} else {
-			cmd = exec.Command("cmd", "/C", cmdLine)
-		}
+		cmd = exec.CommandContext(cmdCtx, "cmd", "/C", cmdLine)
 	case "powershell":
-		if timeout > 0 {
-			cmd = exec.CommandContext(cmdCtx, "powershell", "-NoProfile", "-Command", cmdLine)
-		} else {
-			cmd = exec.Command("powershell", "-NoProfile", "-Command", cmdLine)
-		}
+		cmd = exec.CommandContext(cmdCtx, "powershell", "-NoProfile", "-Command", cmdLine)
 	default:
-		// default to POSIX shell
-		if timeout > 0 {
-			cmd = exec.CommandContext(cmdCtx, "/bin/sh", "-lc", cmdLine)
-		} else {
-			cmd = exec.Command("/bin/sh", "-lc", cmdLine)
+		cmd = exec.CommandContext(cmdCtx, "/bin/sh", "-lc", cmdLine)
+	}
+
+	// ensure children are placed in their own process group on Unix so we
+	// can kill the entire group on timeout.
+	if runtime.GOOS != "windows" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+
+	// use pipes so we can observe stdout/stderr activity for the idle timer
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return 1, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return 1, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return 1, err
+	}
+
+	activity := make(chan struct{}, 1)
+	// helper to copy and notify activity
+	copyNotify := func(r io.ReadCloser, w io.Writer) {
+		defer r.Close()
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				// write to provided writer (this may be a bytes.Buffer)
+				w.Write(buf[:n])
+				// notify activity (non-blocking)
+				select {
+				case activity <- struct{}{}:
+				default:
+				}
+			}
+			if err != nil {
+				if err == io.EOF {
+					return
+				}
+				return
+			}
 		}
 	}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	err := cmd.Run()
-	if err == nil {
+
+	go copyNotify(stdoutPipe, stdout)
+	go copyNotify(stderrPipe, stderr)
+
+	// monitor idle timeout, ctx.Done, and cmd completion
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	timedOut := false
+	var waitErr error
+	if idleTimeout > 0 {
+		idleTimer := time.NewTimer(idleTimeout)
+		defer idleTimer.Stop()
+		for {
+			select {
+			case <-activity:
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
+				}
+				idleTimer.Reset(idleTimeout)
+			case <-idleTimer.C:
+				// idle timeout fired
+				timedOut = true
+				cancel()
+				// attempt to kill process group (Unix) or process (Windows)
+				if cmd.Process != nil {
+					if runtime.GOOS != "windows" {
+						// negative pid indicates pgid
+						_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+					} else {
+						// On Windows try to kill the whole process tree using taskkill
+						if cmd.Process != nil {
+							_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
+						}
+					}
+				}
+				// wait for command to exit
+				waitErr = <-done
+				goto AFTER_WAIT
+			case <-cmdCtx.Done():
+				// total timeout or cancel
+				waitErr = <-done
+				goto AFTER_WAIT
+			case err := <-done:
+				waitErr = err
+				goto AFTER_WAIT
+			}
+		}
+	} else {
+		// no idle timer: just wait for completion or ctx.Done
+		select {
+		case <-cmdCtx.Done():
+			// canceled/timeout
+			timedOut = cmdCtx.Err() == context.DeadlineExceeded
+			if cmd.Process != nil {
+				if runtime.GOOS != "windows" {
+					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				} else {
+					_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
+				}
+			}
+			waitErr = <-done
+		case err := <-done:
+			waitErr = err
+		}
+	}
+
+AFTER_WAIT:
+	if waitErr == nil {
 		return 0, nil
 	}
-	// if context deadline exceeded, signal timeout. Use the command
-	// context's Err() because cmd.Run may return an ExitError instead of
-	// context.DeadlineExceeded directly on some platforms.
-	if timeout > 0 && cmdCtx.Err() == context.DeadlineExceeded {
-		return 124, err
+	// treat ctx deadline exceeded or our timedOut as exit code 124
+	if timedOut || (cmdCtx.Err() == context.DeadlineExceeded) {
+		return 124, waitErr
 	}
 	// try to extract exit code from *exec.ExitError
-	if ee, ok := err.(*exec.ExitError); ok {
+	if ee, ok := waitErr.(*exec.ExitError); ok {
 		if status, ok2 := ee.Sys().(interface{ ExitStatus() int }); ok2 {
-			return status.ExitStatus(), err
+			return status.ExitStatus(), waitErr
 		}
 	}
-	// fallback to generic non-zero
-	return 1, err
+	return 1, waitErr
 }
 
 // printHelp prints a short usage message describing global flags and
@@ -934,6 +1084,7 @@ func printHelp() {
 	fmt.Println("  --var KEY=VAL        Set a variable (repeatable). Flags can appear anywhere")
 	fmt.Println("  --dry-run            Render commands without executing them")
 	fmt.Println("  --persist-logs DIR   Stream logs live to DIR (keeps logs)")
+	fmt.Println("  --idle-timeout D     Global idle timeout for steps with no output (Go duration, e.g. 2s). Step-level idle_timeout overrides this.")
 	fmt.Println("  --shell <sh|cmd|powershell>  Override shell used to run commands")
 	fmt.Println("  --silent             Suppress per-step prints (command lines and stdout/stderr echoes)")
 	fmt.Println()

@@ -1,0 +1,14 @@
+pipeline:
+  name: sim-timeout
+  jobs:
+    - name: job1
+      steps:
+        - name: slow-step
+          type: command
+          command: "sh -c 'echo started; sleep 5; echo done'"
+          timeout: "2s"
+          on_timeout: "continue"
+
+        - name: next-step
+          type: command
+          command: "echo 'I ran after timeout (unless when/else_action prevented it)'"
