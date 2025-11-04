@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -70,6 +71,15 @@ type Step struct {
 	ElseAction string `yaml:"else_action"`
 	ElseStep   string `yaml:"else_step"`
 	ElseJob    string `yaml:"else_job"`
+	// optional timeout for the step, expressed as a Go duration string
+	// (for example: "30s", "1m"). If set, the step's command will be
+	// killed when the timeout is reached and treated as a non-zero exit.
+	Timeout string `yaml:"timeout"`
+	// on_timeout is a shortcut action applied when the step hits its timeout.
+	// Supported values: continue, drop, goto_step, goto_job, fail
+	OnTimeout     string `yaml:"on_timeout"`
+	OnTimeoutStep string `yaml:"on_timeout_step"`
+	OnTimeoutJob  string `yaml:"on_timeout_job"`
 }
 
 // helper to parse simple key=val CLI vars
@@ -443,6 +453,19 @@ func RunWithArgs(args []string) (rc int) {
 			var combinedOut strings.Builder
 			lastExitCode := 0
 			errOccurred := false
+			// parse optional step timeout once per step
+			var stepTimeout time.Duration
+			if step.Timeout != "" {
+				d, perr := time.ParseDuration(step.Timeout)
+				if perr != nil {
+					msg := fmt.Sprintf("invalid timeout '%s' in step %s: %v", step.Timeout, step.Name, perr)
+					fmt.Fprintln(os.Stderr, msg)
+					writeLog(msg)
+					return 6
+				}
+				stepTimeout = d
+			}
+
 			for _, c := range cmds {
 				rc := interpolate(c, vars)
 				// Always print the command being executed so runs are traceable;
@@ -452,7 +475,7 @@ func RunWithArgs(args []string) (rc int) {
 				writeLog("CMD: " + rc)
 				// capture output
 				var outBuf bytes.Buffer
-				exitCode, err := runLocalCommand(rc, &outBuf, &outBuf)
+				exitCode, err := runLocalCommand(rc, stepTimeout, &outBuf, &outBuf)
 				lastExitCode = exitCode
 				if err != nil {
 					msg := fmt.Sprintf("command failed: %v", err)
@@ -698,6 +721,67 @@ func RunWithArgs(args []string) (rc int) {
 				}
 			}
 
+			// If a timeout happened and user supplied an on_timeout shortcut, handle it
+			if errOccurred && lastExitCode == 124 && step.OnTimeout != "" && !conditionMatched {
+				switch step.OnTimeout {
+				case "continue":
+					// nothing, proceed
+				case "drop":
+					writeLog("on_timeout: drop")
+					return 0
+				case "goto_step":
+					if step.OnTimeoutStep == "" {
+						msg := fmt.Sprintf("on_timeout goto_step requires 'on_timeout_step' in step %s", step.Name)
+						fmt.Fprintln(os.Stderr, msg)
+						writeLog(msg)
+						return 6
+					}
+					idx, ok := stepIndex[step.OnTimeoutStep]
+					if !ok {
+						msg := fmt.Sprintf("on_timeout goto_step target '%s' not found in job %s", step.OnTimeoutStep, job.Name)
+						fmt.Fprintln(os.Stderr, msg)
+						writeLog(msg)
+						return 6
+					}
+					si = idx - 1
+				case "goto_job":
+					if step.OnTimeoutJob == "" {
+						msg := fmt.Sprintf("on_timeout goto_job requires 'on_timeout_job' in step %s", step.Name)
+						fmt.Fprintln(os.Stderr, msg)
+						writeLog(msg)
+						return 6
+					}
+					found := -1
+					for k := range execJobs {
+						if execJobs[k].Name == step.OnTimeoutJob {
+							found = k
+							break
+						}
+					}
+					if found == -1 {
+						msg := fmt.Sprintf("on_timeout goto_job target '%s' not found", step.OnTimeoutJob)
+						fmt.Fprintln(os.Stderr, msg)
+						writeLog(msg)
+						return 6
+					}
+					ji = found - 1
+				case "fail":
+					msg := fmt.Sprintf("step %s timed out", step.Name)
+					if !(globalSilent || step.Silent) {
+						fmt.Fprintln(os.Stderr, msg)
+					}
+					writeLog(msg)
+					return 7
+				default:
+					msg := fmt.Sprintf("unknown on_timeout action '%s' in step %s", step.OnTimeout, step.Name)
+					fmt.Fprintln(os.Stderr, msg)
+					writeLog(msg)
+					return 6
+				}
+				// mark as handled so the default non-zero handling doesn't fire
+				conditionMatched = true
+			}
+
 			// If no condition matched and a command returned non-zero, treat as failure
 			if !conditionMatched && errOccurred {
 				msg := fmt.Sprintf("step %s command(s) returned non-zero exit and no condition matched", step.Name)
@@ -706,6 +790,7 @@ func RunWithArgs(args []string) (rc int) {
 				return 5
 			}
 		}
+
 	}
 
 	// On success we avoid printing the log path to prevent confusion when the
@@ -762,7 +847,7 @@ func interpolate(tmpl string, vars map[string]string) string {
 
 // runLocalCommand runs the given command line under /bin/sh -lc and returns
 // the process exit code and an error (if any). Exit code is 0 on success.
-func runLocalCommand(cmdLine string, stdout io.Writer, stderr io.Writer) (int, error) {
+func runLocalCommand(cmdLine string, timeout time.Duration, stdout io.Writer, stderr io.Writer) (int, error) {
 	var cmd *exec.Cmd
 	sh := runtimeShell
 	if sh == "" {
@@ -772,20 +857,50 @@ func runLocalCommand(cmdLine string, stdout io.Writer, stderr io.Writer) (int, e
 			sh = "sh"
 		}
 	}
+	// If a timeout is requested, use a context so the process can be
+	// canceled when the deadline is reached.
+	var cmdCtx context.Context
+	var cancel func()
+	if timeout > 0 {
+		cmdCtx, cancel = context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+	} else {
+		cmdCtx = context.Background()
+	}
+
+	// build command with context when supported
 	switch strings.ToLower(sh) {
 	case "cmd":
-		cmd = exec.Command("cmd", "/C", cmdLine)
+		if timeout > 0 {
+			cmd = exec.CommandContext(cmdCtx, "cmd", "/C", cmdLine)
+		} else {
+			cmd = exec.Command("cmd", "/C", cmdLine)
+		}
 	case "powershell":
-		cmd = exec.Command("powershell", "-NoProfile", "-Command", cmdLine)
+		if timeout > 0 {
+			cmd = exec.CommandContext(cmdCtx, "powershell", "-NoProfile", "-Command", cmdLine)
+		} else {
+			cmd = exec.Command("powershell", "-NoProfile", "-Command", cmdLine)
+		}
 	default:
 		// default to POSIX shell
-		cmd = exec.Command("/bin/sh", "-lc", cmdLine)
+		if timeout > 0 {
+			cmd = exec.CommandContext(cmdCtx, "/bin/sh", "-lc", cmdLine)
+		} else {
+			cmd = exec.Command("/bin/sh", "-lc", cmdLine)
+		}
 	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	err := cmd.Run()
 	if err == nil {
 		return 0, nil
+	}
+	// if context deadline exceeded, signal timeout. Use the command
+	// context's Err() because cmd.Run may return an ExitError instead of
+	// context.DeadlineExceeded directly on some platforms.
+	if timeout > 0 && cmdCtx.Err() == context.DeadlineExceeded {
+		return 124, err
 	}
 	// try to extract exit code from *exec.ExitError
 	if ee, ok := err.(*exec.ExitError); ok {

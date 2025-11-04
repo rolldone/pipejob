@@ -195,6 +195,73 @@ Notes:
 - `--silent` is a convenience to quickly hide noisy step output during local runs; if you want a mixed policy (some steps silent, some noisy) omit `--silent` and use the per-step `silent: true` only on the noisy steps.
 - If you still need full logs while running silently, use `--persist-logs DIR` to stream logs to disk.
 
+Timeouts
+--------
+
+`pipejob` supports an optional per-step `timeout` field. Specify a Go duration string (for example `"30s"`, `"1m"`) and the step's command will be killed when the timeout is reached and treated as a non-zero exit (exit code 124).
+
+Example:
+
+```yaml
+steps:
+  - name: maybe-slow
+    type: command
+    command: "sleep 10"
+    timeout: "3s"
+
+  - name: next
+    type: command
+    command: "echo continued"
+```
+
+Additional examples: on_timeout shortcuts
+---------------------------------------
+
+You can use the `on_timeout` shortcut to pick an action when a step hits its timeout. Two common patterns are shown below.
+
+1) Jump to a recovery step in the same job:
+
+```yaml
+steps:
+  - name: slow
+    type: command
+    command: "sleep 10"
+    timeout: "2s"
+    on_timeout: "goto_step"
+    on_timeout_step: "recover"
+
+  - name: recover
+    type: command
+    command: "echo recovered after timeout"
+```
+
+2) Jump to another job in the pipeline:
+
+```yaml
+pipeline:
+  runs: [job1, job2]
+jobs:
+  - name: job1
+    steps:
+      - name: slow
+        type: command
+        command: "sleep 10"
+        timeout: "2s"
+        on_timeout: "goto_job"
+        on_timeout_job: "job2"
+
+  - name: job2
+    steps:
+      - name: recovery
+        type: command
+        command: "echo recovery job2 - jumped from job1 on timeout"
+```
+
+Notes:
+- Timeouts are per-step and apply to the whole step (if a step has multiple `commands`, the timeout applies across the sequence as it's parsed per-step).
+- If a timeout occurs the runner treats it as a non-zero exit (exit code 124) and normal `when`/`conditions`/`else_action` evaluation still applies.
+- Implemented with context cancellation; on some systems child processes may survive if they spawn backgrounded descendants. If you need strict process-group killing we can improve the implementation to set process groups and kill them on timeout.
+
 Shell / Windows behaviour
 -------------------------
 
