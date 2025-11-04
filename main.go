@@ -10,11 +10,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// runtimeShell holds an optional shell override (sh|cmd|powershell).
+// When empty the runner auto-detects based on runtime.GOOS.
+var runtimeShell string
 
 // Minimal types matching the sample job YAML. We only support the fields
 // required for local command execution.
@@ -83,6 +88,7 @@ func RunWithArgs(args []string) (rc int) {
 	envFile := ".env"
 	dryRun := false
 	persistLogs := ""
+	shellHint := "" // optional shell override: sh|cmd|powershell
 
 	cleaned := make([]string, 0, len(args))
 	for i := 0; i < len(args); {
@@ -129,6 +135,20 @@ func RunWithArgs(args []string) (rc int) {
 			persistLogs = strings.TrimPrefix(a, "--persist-logs=")
 			i++
 			continue
+		}
+		if strings.HasPrefix(a, "--shell=") {
+			shellHint = strings.TrimPrefix(a, "--shell=")
+			i++
+			continue
+		}
+		if a == "--shell" {
+			if i+1 < len(args) {
+				shellHint = args[i+1]
+				i += 2
+				continue
+			}
+			fmt.Fprintln(os.Stderr, "--shell requires an argument (sh|cmd|powershell)")
+			return 2
 		}
 		if a == "--persist-logs" {
 			if i+1 < len(args) {
@@ -181,6 +201,9 @@ func RunWithArgs(args []string) (rc int) {
 		return 2
 	}
 	yamlPath := cleaned[0]
+
+	// expose shell hint to runLocalCommand via package-level variable
+	runtimeShell = shellHint
 
 	// Read YAML
 	b, err := os.ReadFile(yamlPath)
@@ -709,7 +732,24 @@ func interpolate(tmpl string, vars map[string]string) string {
 // runLocalCommand runs the given command line under /bin/sh -lc and returns
 // the process exit code and an error (if any). Exit code is 0 on success.
 func runLocalCommand(cmdLine string, stdout io.Writer, stderr io.Writer) (int, error) {
-	cmd := exec.Command("/bin/sh", "-lc", cmdLine)
+	var cmd *exec.Cmd
+	sh := runtimeShell
+	if sh == "" {
+		if runtime.GOOS == "windows" {
+			sh = "cmd"
+		} else {
+			sh = "sh"
+		}
+	}
+	switch strings.ToLower(sh) {
+	case "cmd":
+		cmd = exec.Command("cmd", "/C", cmdLine)
+	case "powershell":
+		cmd = exec.Command("powershell", "-NoProfile", "-Command", cmdLine)
+	default:
+		// default to POSIX shell
+		cmd = exec.Command("/bin/sh", "-lc", cmdLine)
+	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	err := cmd.Run()

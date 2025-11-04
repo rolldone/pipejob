@@ -160,6 +160,33 @@ This mirrors the behaviour used in the main `pipeline` tool: keep an in‑memory
 
 If you want logs regardless of success/failure, use `--persist-logs DIR` to stream logs live into a directory you control.
 
+Shell / Windows behaviour
+-------------------------
+
+`pipejob` auto-detects the host OS and uses a sensible default shell:
+
+- On Windows the runner uses `cmd.exe /C` by default.
+- On Unix-like systems it uses `/bin/sh -lc`.
+
+If you need to override the default shell (for example to use PowerShell on Windows), use the `--shell` flag. Supported values: `sh`, `cmd`, `powershell`.
+
+Examples:
+
+```bash
+# force PowerShell (Windows)
+./pipejob --shell powershell job.yaml
+
+# force cmd (Windows) or rely on auto-detect
+./pipejob --shell cmd job.yaml
+
+# POSIX shell (default on Linux/macOS)
+./pipejob --shell sh job.yaml
+```
+
+Notes:
+- The YAML step commands are executed by the chosen shell, so commands must be compatible with that shell (e.g., `rm` is POSIX, `del` is cmd). `pipejob` does not translate commands across shells.
+- `--shell` is a global flag and can appear anywhere on the command line (before or after the job YAML).
+
 else_action and how it relates to conditions/when
 -----------------------------------------------
 
