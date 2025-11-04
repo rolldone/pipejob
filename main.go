@@ -542,7 +542,8 @@ func RunWithArgs(args []string) int {
 		}
 	}
 
-	fmt.Printf("pipejob: completed successfully (logs: %s)\n", logPath)
+	// On success we avoid printing the log path to prevent confusion when the
+	// temporary workspace is cleaned up. Errors still print messages to stderr.
 	writeLog("completed")
 	return 0
 }

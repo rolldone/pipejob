@@ -113,3 +113,31 @@ Notes:
 - Legacy `conditions` (pattern + action) are still supported and evaluated first for backward compatibility; `when` is evaluated after. If you prefer `when` to be primary we can flip the order in a follow-up.
 - `when` values are interpolated using the same `{{VAR}}` rules before evaluation (e.g. `contains: "{{OUT}}"`).
 - `exit_code` matches the last command's exit code when a step runs multiple commands.
+
+Legacy `conditions`
+-------------------
+
+The older `conditions` form (regex `pattern` + `action`) is still supported and is evaluated before the `when` block for backward compatibility. Here's a small example showing common actions:
+
+```yaml
+steps:
+  - name: parse
+    type: command
+    command: ./parse.sh
+    conditions:
+      - pattern: 'OK$'
+        action: continue
+      - pattern: 'STOP'
+        action: drop   # stop the pipeline and return success
+      - pattern: 'ERR'
+        action: fail   # stop the pipeline and return failure
+```
+
+Drop vs Fail
+------------
+- `drop` immediately ends the run and returns exit code 0 (success).
+- `fail` immediately ends the run and returns a non-zero exit code (currently 7).
+
+Log behavior
+------------
+By default `pipejob` creates a temporary workspace (`.sync_temp/pipejob-<timestamp>`) and removes it on success. That means a successful run that used `drop` may not leave an inspectable `run.log` unless you specify `--persist-logs DIR`. Use `--persist-logs` to keep the temp workspace or a directory of your choice for debugging.
