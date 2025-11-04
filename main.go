@@ -76,12 +76,80 @@ func main() {
 
 // RunWithArgs implements the CLI behavior and returns an exit code.
 func RunWithArgs(args []string) (rc int) {
-	// support a simple generator: `pipejob new <out.yaml>`
-	if len(args) > 0 && args[0] == "new" {
+	// Pre-scan args so global flags like --var can appear anywhere (before
+	// or after the positional YAML file). We extract supported flags and
+	// return a cleaned args slice for positional handling.
+	var cliVars kvList
+	envFile := ".env"
+	dryRun := false
+	persistLogs := ""
+
+	cleaned := make([]string, 0, len(args))
+	for i := 0; i < len(args); {
+		a := args[i]
+		if strings.HasPrefix(a, "--var=") {
+			cliVars.Set(strings.TrimPrefix(a, "--var="))
+			i++
+			continue
+		}
+		if a == "--var" {
+			if i+1 < len(args) {
+				cliVars.Set(args[i+1])
+				i += 2
+				continue
+			}
+			fmt.Fprintln(os.Stderr, "--var requires an argument")
+			return 2
+		}
+		if strings.HasPrefix(a, "--env-file=") {
+			envFile = strings.TrimPrefix(a, "--env-file=")
+			i++
+			continue
+		}
+		if a == "--env-file" {
+			if i+1 < len(args) {
+				envFile = args[i+1]
+				i += 2
+				continue
+			}
+			fmt.Fprintln(os.Stderr, "--env-file requires an argument")
+			return 2
+		}
+		if a == "--dry-run" || strings.HasPrefix(a, "--dry-run=") {
+			if a == "--dry-run" {
+				dryRun = true
+			} else {
+				v := strings.TrimPrefix(a, "--dry-run=")
+				dryRun = v != "false" && v != "0"
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "--persist-logs=") {
+			persistLogs = strings.TrimPrefix(a, "--persist-logs=")
+			i++
+			continue
+		}
+		if a == "--persist-logs" {
+			if i+1 < len(args) {
+				persistLogs = args[i+1]
+				i += 2
+				continue
+			}
+			fmt.Fprintln(os.Stderr, "--persist-logs requires an argument")
+			return 2
+		}
+		// unknown or positional -> keep
+		cleaned = append(cleaned, a)
+		i++
+	}
+
+	// If subcommand 'new' is requested it will be the first cleaned arg.
+	if len(cleaned) > 0 && cleaned[0] == "new" {
 		newFs := flag.NewFlagSet("new", flag.ContinueOnError)
 		var name string
 		newFs.StringVar(&name, "name", "generated", "pipeline name")
-		if err := newFs.Parse(args[1:]); err != nil {
+		if err := newFs.Parse(cleaned[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 2
 		}
@@ -107,27 +175,12 @@ func RunWithArgs(args []string) (rc int) {
 		fmt.Printf("generated %s\n", outPath)
 		return 0
 	}
-	var cliVars kvList
-	var envFile string
-	var dryRun bool
-	var persistLogs string
 
-	fs := flag.NewFlagSet("pipejob", flag.ContinueOnError)
-	fs.Var(&cliVars, "var", "key=val variable to render (repeatable)")
-	fs.StringVar(&envFile, "env-file", ".env", "path to .env file (optional)")
-	fs.BoolVar(&dryRun, "dry-run", false, "validate and print steps without executing")
-	fs.StringVar(&persistLogs, "persist-logs", "", "directory to persist logs (optional)")
-
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 2
-	}
-
-	if fs.NArg() == 0 {
+	if len(cleaned) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: pipejob <job.yaml> [flags]")
 		return 2
 	}
-	yamlPath := fs.Arg(0)
+	yamlPath := cleaned[0]
 
 	// Read YAML
 	b, err := os.ReadFile(yamlPath)
