@@ -9,12 +9,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strconv"
-	"syscall"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -487,28 +487,28 @@ func RunWithArgs(args []string) (rc int) {
 				stepTimeout = d
 			}
 
-					// parse optional idle timeout
-					var stepIdleTimeout time.Duration
-					// step-level idle_timeout takes precedence; otherwise use global default if provided
-					if step.IdleTimeout != "" {
-						d, perr := time.ParseDuration(step.IdleTimeout)
-						if perr != nil {
-							msg := fmt.Sprintf("invalid idle_timeout '%s' in step %s: %v", step.IdleTimeout, step.Name, perr)
-							fmt.Fprintln(os.Stderr, msg)
-							writeLog(msg)
-							return 6
-						}
-						stepIdleTimeout = d
-					} else if defaultIdleTimeoutStr != "" {
-						d, perr := time.ParseDuration(defaultIdleTimeoutStr)
-						if perr != nil {
-							msg := fmt.Sprintf("invalid global --idle-timeout value '%s': %v", defaultIdleTimeoutStr, perr)
-							fmt.Fprintln(os.Stderr, msg)
-							writeLog(msg)
-							return 6
-						}
-						stepIdleTimeout = d
-					}
+			// parse optional idle timeout
+			var stepIdleTimeout time.Duration
+			// step-level idle_timeout takes precedence; otherwise use global default if provided
+			if step.IdleTimeout != "" {
+				d, perr := time.ParseDuration(step.IdleTimeout)
+				if perr != nil {
+					msg := fmt.Sprintf("invalid idle_timeout '%s' in step %s: %v", step.IdleTimeout, step.Name, perr)
+					fmt.Fprintln(os.Stderr, msg)
+					writeLog(msg)
+					return 6
+				}
+				stepIdleTimeout = d
+			} else if defaultIdleTimeoutStr != "" {
+				d, perr := time.ParseDuration(defaultIdleTimeoutStr)
+				if perr != nil {
+					msg := fmt.Sprintf("invalid global --idle-timeout value '%s': %v", defaultIdleTimeoutStr, perr)
+					fmt.Fprintln(os.Stderr, msg)
+					writeLog(msg)
+					return 6
+				}
+				stepIdleTimeout = d
+			}
 
 			for _, c := range cmds {
 				rc := interpolate(c, vars)
@@ -1084,7 +1084,7 @@ func printHelp() {
 	fmt.Println("  --var KEY=VAL        Set a variable (repeatable). Flags can appear anywhere")
 	fmt.Println("  --dry-run            Render commands without executing them")
 	fmt.Println("  --persist-logs DIR   Stream logs live to DIR (keeps logs)")
-	fmt.Println("  --idle-timeout D     Global idle timeout for steps with no output (Go duration, e.g. 2s). Step-level idle_timeout overrides this.")
+	fmt.Println("  --idle-timeout D     Global idle timeout for steps with no output (Go duration, e.g. 2s). Step-level idle_timeout overrides this. Default: 0s (disabled)")
 	fmt.Println("  --shell <sh|cmd|powershell>  Override shell used to run commands")
 	fmt.Println("  --silent             Suppress per-step prints (command lines and stdout/stderr echoes)")
 	fmt.Println()

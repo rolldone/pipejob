@@ -262,7 +262,7 @@ Notes:
 - If a timeout occurs the runner treats it as a non-zero exit (exit code 124) and normal `when`/`conditions`/`else_action` evaluation still applies.
  - Implemented with context cancellation; on some systems child processes may survive if they spawn backgrounded descendants. If you need strict process-group killing we can improve the implementation to set process groups and kill them on timeout.
 
- - Idle timeout: `idle_timeout` is supported per-step (Go duration string). If a command produces no stdout/stderr activity for the
+ - Idle timeout: `idle_timeout` is supported per-step (Go duration string). Default is `0s` (disabled). If a command produces no stdout/stderr activity for the
    specified duration the runner will kill the process (exit code 124) and normal `when`/`conditions`/`on_timeout` handling applies. See
    `examples/idle-timeout.yaml` for a demonstration where a long `sleep` with `idle_timeout: "2s"` jumps to a recovery step.
   
